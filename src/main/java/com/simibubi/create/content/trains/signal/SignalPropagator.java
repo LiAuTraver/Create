@@ -1,11 +1,11 @@
 package com.simibubi.create.content.trains.signal;
 
-import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
@@ -54,7 +54,7 @@ public class SignalPropagator {
 	}
 
 	public static void notifySignalsOfNewNode(TrackGraph graph, TrackNode node) {
-		List<Couple<TrackNode>> frontier = new ArrayList<>();
+		var frontier = new ArrayDeque<Couple<TrackNode>>();
 		frontier.add(Couple.create(node, null));
 		walkSignals(graph, frontier, pair -> {
 			TrackNode node1 = pair.getFirst();
@@ -118,8 +118,8 @@ public class SignalPropagator {
 	}
 
 	public static void walkSignals(TrackGraph graph, SignalBoundary signal, boolean front,
-		Predicate<Pair<TrackNode, SignalBoundary>> boundaryCallback, Predicate<EdgeData> nonBoundaryCallback,
-		boolean forCollection) {
+	                               Predicate<Pair<TrackNode, SignalBoundary>> boundaryCallback, Predicate<EdgeData> nonBoundaryCallback,
+	                               boolean forCollection) {
 
 		Couple<TrackNodeLocation> edgeLocation = signal.edgeLocation;
 		Couple<TrackNode> startNodes = edgeLocation.map(graph::locateNode);
@@ -152,17 +152,17 @@ public class SignalPropagator {
 		}
 
 		// Search for any connected signals
-		List<Couple<TrackNode>> frontier = new ArrayList<>();
+		var frontier = new ArrayDeque<Couple<TrackNode>>();
 		frontier.add(Couple.create(node2, node1));
 		walkSignals(graph, frontier, boundaryCallback, nonBoundaryCallback, forCollection);
 	}
 
-	private static void walkSignals(TrackGraph graph, List<Couple<TrackNode>> frontier,
-		Predicate<Pair<TrackNode, SignalBoundary>> boundaryCallback, Predicate<EdgeData> nonBoundaryCallback,
-		boolean forCollection) {
+	private static void walkSignals(TrackGraph graph, Queue<Couple<TrackNode>> frontier,
+	                                Predicate<Pair<TrackNode, SignalBoundary>> boundaryCallback,
+									Predicate<EdgeData> nonBoundaryCallback, boolean forCollection) {
 		Set<TrackEdge> visited = new HashSet<>();
 		while (!frontier.isEmpty()) {
-			Couple<TrackNode> couple = frontier.remove(0);
+			var couple = frontier.poll();
 			TrackNode currentNode = couple.getFirst();
 			TrackNode prevNode = couple.getSecond();
 
