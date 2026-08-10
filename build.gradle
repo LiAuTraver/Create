@@ -87,6 +87,7 @@ neoForge {
 
         gameTestServer {
             type = "gameTestServer"
+            systemProperty("create.testDataDir", project.file("tmp").absolutePath)
         }
     }
 }
