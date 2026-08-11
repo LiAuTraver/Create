@@ -1,5 +1,6 @@
 package com.simibubi.create.content.trains.graph;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -9,12 +10,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import com.simibubi.create.Create;
@@ -106,8 +109,12 @@ public class TrackGraph {
 
 	//
 
-	public TrackGraphBounds getBounds(Level level) {
-		return bounds.computeIfAbsent(level.dimension(), dim -> new TrackGraphBounds(this, dim));
+	public TrackGraphBounds getBounds(@NotNull Level level) {
+		return getBounds(level.dimension());
+	}
+
+	public TrackGraphBounds getBounds(@NotNull ResourceKey<Level> dimension) {
+		return bounds.computeIfAbsent(dimension, dim -> new TrackGraphBounds(this, dim));
 	}
 
 	public void invalidateBounds() {
@@ -115,9 +122,8 @@ public class TrackGraph {
 		bounds.clear();
 	}
 
-	//
 
-	public Set<TrackNodeLocation> getNodes() {
+	public @NotNull Set<TrackNodeLocation> getNodes() {
 		return nodes.keySet();
 	}
 
@@ -147,25 +153,30 @@ public class TrackGraph {
 		addNode(new TrackNode(location, netId, normal));
 	}
 
-	public void addNode(TrackNode node) {
+	public void addNode(@NotNull TrackNode node) {
+
 		TrackNodeLocation location = node.getLocation();
 		if (nodes.containsKey(location))
 			removeNode(null, location);
 		nodes.put(location, node);
 		nodesById.put(node.getNetId(), node);
+		Create.RAILWAYS.onNodeAdded(this, location);
 	}
 
-	public boolean addNodeIfAbsent(TrackNode node) {
+	public boolean addNodeIfAbsent(@NotNull TrackNode node) {
+
 		if (nodes.putIfAbsent(node.getLocation(), node) != null)
 			return false;
 		nodesById.put(node.getNetId(), node);
+		Create.RAILWAYS.onNodeAdded(this, node.getLocation());
 		return true;
 	}
 
-	public boolean removeNode(@Nullable LevelAccessor level, TrackNodeLocation location) {
+	public boolean removeNode(@Nullable LevelAccessor level, @NotNull TrackNodeLocation location) {
 		TrackNode removed = nodes.remove(location);
 		if (removed == null)
 			return false;
+		Create.RAILWAYS.onNodeRemoved(this, location);
 
 		Map<UUID, Train> trains = Create.RAILWAYS.trains;
 		for (UUID uuid : trains.keySet()) {
@@ -259,6 +270,13 @@ public class TrackGraph {
 		}));
 
 		edgePoints.transferAll(toOther, toOther.edgePoints);
+
+		// notify the manager that these nodes are leaving.
+		// without this, the node2graph cache would keep a stale reference to
+		// this soon-to-be-discarded graph alongside the new owner,
+		// and NPE chaos ensues.
+		Create.RAILWAYS.onNodeRemoved(this, nodes.keySet());
+
 		nodes.clear();
 		connectionsByNode.clear();
 		toOther.invalidateBounds();
@@ -273,10 +291,10 @@ public class TrackGraph {
 	}
 
 	public Set<TrackGraph> findDisconnectedGraphs(@Nullable LevelAccessor level,
-												  @Nullable Map<Integer, Pair<Integer, UUID>> splitSubGraphs) {
+	                                              @Nullable Map<Integer, Pair<Integer, UUID>> splitSubGraphs) {
 		Set<TrackGraph> dicovered = new HashSet<>();
 		Set<TrackNodeLocation> vertices = new HashSet<>(nodes.keySet());
-		List<TrackNodeLocation> frontier = new ArrayList<>();
+		Queue<TrackNodeLocation> frontier = new ArrayDeque<>();
 		TrackGraph target = null;
 
 		while (!vertices.isEmpty()) {
@@ -290,7 +308,7 @@ public class TrackGraph {
 			vertices.remove(start);
 
 			while (!frontier.isEmpty()) {
-				TrackNodeLocation current = frontier.remove(0);
+				var current = frontier.poll();
 				TrackNode currentNode = locateNode(current);
 
 				Map<TrackNode, TrackEdge> connections = getConnectionsFrom(currentNode);
@@ -308,7 +326,6 @@ public class TrackGraph {
 				}
 			}
 
-			frontier.clear();
 			target = new TrackGraph();
 		}
 
@@ -361,6 +378,9 @@ public class TrackGraph {
 				train.graph = target;
 			}
 
+		// Notify the manager before removing from the internal map so the
+		// node2graph reverse-index is kept consistent (mirrors what removeNode does).
+		Create.RAILWAYS.onNodeRemoved(this, nodeLoc);
 		nodes.remove(nodeLoc);
 		nodesById.remove(node.getNetId());
 		connectionsByNode.remove(node);
@@ -384,18 +404,35 @@ public class TrackGraph {
 		return connectionsFrom.get(nodes.getSecond());
 	}
 
-	public void connectNodes(LevelAccessor reader, DiscoveredLocation location, DiscoveredLocation location2,
-							 @Nullable BezierConnection turn) {
+	public void connectNodes(@SuppressWarnings("unused") LevelAccessor reader, @NotNull DiscoveredLocation location, @NotNull DiscoveredLocation location2,
+	                         @Nullable BezierConnection turn) {
 		TrackNode node1 = nodes.get(location);
 		TrackNode node2 = nodes.get(location2);
+
+		if (node1 == null || node2 == null) {
+			// unlikey to happen, just in case
+			Create.LOGGER.warn("Attempted to connect nodes that do not exist in the graph: {} and {}", location, location2);
+			return;
+		}
 
 		boolean bezier = turn != null;
 		TrackMaterial material = bezier ? turn.getMaterial() : location2.materialA;
 		TrackEdge edge = new TrackEdge(node1, node2, turn, material);
 		TrackEdge edge2 = new TrackEdge(node2, node1, bezier ? turn.secondary() : null, material);
 
-		for (TrackGraph graph : Create.RAILWAYS.trackNetworks.values()) {
-			for (TrackNode otherNode1 : graph.nodes.values()) {
+		var edgeBounds = edge.getBounds();
+//		var searchBox = edgeBounds.inflate(384);
+
+		for (var graph : Create.RAILWAYS.trackNetworks.values()) {
+			if (graph != this) {
+				var gBounds = graph.getBounds(node1.location.dimension);
+				if (gBounds == null || gBounds.box == null || !gBounds.box.intersects(edgeBounds))
+					continue;
+			}
+
+			for (var otherNode1 : graph.nodes.values()) {
+//				if (!searchBox.contains(otherNode1.location.getLocation()))
+//					continue;
 				Map<TrackNode, TrackEdge> connections = graph.connectionsByNode.get(otherNode1);
 				if (connections == null)
 					continue;
@@ -416,6 +453,8 @@ public class TrackGraph {
 					if (!bezier && !otherEdge.isTurn())
 						continue;
 					if (otherEdge.isTurn() && otherEdge.turn.isPrimary())
+						continue;
+					if (!edgeBounds.intersects(otherEdge.getBounds()))
 						continue;
 
 					Collection<double[]> intersections =

@@ -1,17 +1,19 @@
 package com.simibubi.create.content.trains.track;
 
-import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
+import java.util.Objects;
+import java.util.Queue;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.simibubi.create.Create;
 import com.simibubi.create.api.event.TrackGraphMergeEvent;
 import com.simibubi.create.content.trains.GlobalRailwayManager;
 import com.simibubi.create.content.trains.graph.TrackGraph;
-import com.simibubi.create.content.trains.graph.TrackGraphSync;
 import com.simibubi.create.content.trains.graph.TrackNode;
 import com.simibubi.create.content.trains.graph.TrackNodeLocation.DiscoveredLocation;
 import com.simibubi.create.content.trains.signal.SignalPropagator;
@@ -21,243 +23,321 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+
 import net.neoforged.neoforge.common.NeoForge;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TrackPropagator {
 
-	static class FrontierEntry {
-		DiscoveredLocation prevNode;
-		DiscoveredLocation currentNode;
-		DiscoveredLocation parentNode;
-
-		public FrontierEntry(DiscoveredLocation parent, DiscoveredLocation previousNode, DiscoveredLocation location) {
-			parentNode = parent;
-			prevNode = previousNode;
-			currentNode = location;
-		}
+	private record FrontierEntry(@Nullable DiscoveredLocation parent, @Nullable DiscoveredLocation previous,
+	                             @NotNull DiscoveredLocation current) {
 	}
 
-	public static void onRailRemoved(LevelAccessor reader, BlockPos pos, BlockState state) {
-		if (!(state.getBlock() instanceof ITrackBlock track))
-			return;
+	@NotNull
+	final GlobalRailwayManager M;
+	@NotNull
+	final LevelAccessor LA;
+	@NotNull
+	final BlockPos BP;
+	@NotNull
+	final BlockState BS;
+	@NotNull
+	final ITrackBlock TB;
+	@NotNull
+	final static Logger L = LoggerFactory.getLogger(TrackPropagator.class);
+	final static int kMaxThreshold = 0x2000;
 
-		Collection<DiscoveredLocation> ends = track.getConnected(reader, pos, state, false, null);
-		GlobalRailwayManager manager = Create.RAILWAYS;
-		TrackGraphSync sync = manager.sync;
-
-		// 1. Remove any nodes this rail was part of
-
-		for (DiscoveredLocation removedLocation : ends) {
-			List<TrackGraph> intersecting = manager.getGraphs(reader, removedLocation);
-			for (TrackGraph foundGraph : intersecting) {
-				TrackNode removedNode = foundGraph.locateNode(removedLocation);
-				if (removedNode == null)
-					continue;
-				foundGraph.removeNode(reader, removedLocation);
-				sync.nodeRemoved(foundGraph, removedNode);
-				if (!foundGraph.isEmpty())
-					continue;
-				manager.removeGraphAndGroup(foundGraph);
-				sync.graphRemoved(foundGraph);
-			}
-		}
-
-		Set<BlockPos> positionsToUpdate = new HashSet<>();
-		for (DiscoveredLocation removedEnd : ends)
-			positionsToUpdate.addAll(removedEnd.allAdjacent());
-
-		// 2. Re-run railAdded for any track that was disconnected from this track
-
-		Set<TrackGraph> toUpdate = new HashSet<>();
-		for (BlockPos blockPos : positionsToUpdate)
-			if (!blockPos.equals(pos)) {
-				TrackGraph onRailAdded = onRailAdded(reader, blockPos, reader.getBlockState(blockPos));
-				if (onRailAdded != null)
-					toUpdate.add(onRailAdded);
-			}
-
-		// 3. Ensure any affected graph gets checked for segmentation
-
-		for (TrackGraph railGraph : toUpdate)
-			manager.updateSplitGraph(reader, railGraph);
-
-		manager.markTracksDirty();
+	/// the block state must be a track block, otherwise the behavior is undefined.
+	private TrackPropagator(@NotNull LevelAccessor LA, @NotNull BlockPos BP, @NotNull BlockState BS) {
+		this.M = Create.RAILWAYS;
+		this.LA = LA;
+		this.BP = BP;
+		this.BS = BS;
+		this.TB = (ITrackBlock) BS.getBlock();
 	}
 
-	public static TrackGraph onRailAdded(LevelAccessor reader, BlockPos pos, BlockState state) {
-		if (!(state.getBlock()instanceof ITrackBlock track))
+	public static @Nullable TrackGraph onRailAdded(@NotNull LevelAccessor reader, @NotNull BlockPos pos,
+	                                               @NotNull BlockState state) {
+		if (!(state.getBlock() instanceof ITrackBlock))
+			// this is normal and expected behavior when calling from the onRailRemoved call
+			// since it's needed to update adjacent block.
 			return null;
 
-		// 1. Remove all immediately reachable node locations
+		return new TrackPropagator(reader, pos, state).onRailAdded();
+	}
 
-		GlobalRailwayManager manager = Create.RAILWAYS;
-		TrackGraphSync sync = manager.sync;
-		List<FrontierEntry> frontier = new ArrayList<>();
-		Set<DiscoveredLocation> visited = new HashSet<>();
-		Set<TrackGraph> connectedGraphs = new HashSet<>();
-		addInitialEndsOf(reader, pos, state, track, frontier, false);
+	public static void onRailRemoved(@NotNull LevelAccessor reader, @NotNull BlockPos pos, @NotNull BlockState state) {
+		if (!(state.getBlock() instanceof ITrackBlock)) {
+			L.warn("state {} is not an instance of ITrackBlock, ignoring it.", state.getBlock().getClass().getName());
+			return;
+		}
+		new TrackPropagator(reader, pos, state).onRailRemoved();
+	}
 
-		int emergencyExit = 1000;
-		while (!frontier.isEmpty()) {
-			if (emergencyExit-- == 0)
-				break;
+	private @NotNull TrackGraph onRailAdded() {
+		// < remove all immediately reachable node locations around the new rail
+		var frontiers = getFrontiers(false);
+		final var connectedGraphs = removeReachableNodes(frontiers);
 
-			FrontierEntry entry = frontier.remove(0);
-			List<TrackGraph> intersecting = manager.getGraphs(reader, entry.currentNode);
-			for (TrackGraph graph : intersecting) {
-				TrackNode node = graph.locateNode(entry.currentNode);
-				graph.removeNode(reader, entry.currentNode);
-				sync.nodeRemoved(graph, node);
-				connectedGraphs.add(graph);
-				continue;
-			}
+		// < resolve target graph, merging if necessary
+		final var targetGraph = canonicalizeGraph(connectedGraphs);
 
-			if (!intersecting.isEmpty())
-				continue;
+		// < find the first graph node candidate nearby
+		frontiers = getFrontiers(true);
 
-			Collection<DiscoveredLocation> ends = ITrackBlock.walkConnectedTracks(reader, entry.currentNode, false);
-			if (entry.prevNode != null)
-				ends.remove(entry.prevNode);
-			continueSearch(frontier, visited, entry, ends);
+		final var startNode = getStartNode(frontiers);
+		if (startNode == null) {
+			L.warn("Start node candidate must not be null when placing track, aborting graph build.");
+			return targetGraph;
 		}
 
-		frontier.clear();
-		visited.clear();
-		TrackGraph graph = null;
+		// < build up the graph via all connected nodes
+		final var addedNodes = buildGraph(targetGraph, startNode);
+		addedNodes.forEach(trackNode -> SignalPropagator.notifySignalsOfNewNode(targetGraph, trackNode));
 
-		// Remove empty graphs
-		for (Iterator<TrackGraph> iterator = connectedGraphs.iterator(); iterator.hasNext();) {
-			TrackGraph railGraph = iterator.next();
-			if (!railGraph.isEmpty() || connectedGraphs.size() == 1)
-				continue;
-			manager.removeGraphAndGroup(railGraph);
-			sync.graphRemoved(railGraph);
-			iterator.remove();
-		}
+		M.markTracksDirty();
+		return targetGraph;
+	}
 
-		// Merge graphs if more than 1
-		if (connectedGraphs.size() > 1) {
-			for (TrackGraph other : connectedGraphs)
-				if (graph == null)
-					graph = other;
-				else {
-					NeoForge.EVENT_BUS.post(new TrackGraphMergeEvent(other, graph));
-					other.transferAll(graph);
-					manager.removeGraphAndGroup(other);
-					sync.graphRemoved(other);
+	private void onRailRemoved() {
+		final var connectedLocs = TB.getConnected(LA, BP, BS, false, null);
+
+		final var positionsToUpdate = connectedLocs.stream()
+			.peek(removedLocation -> M.getGraphs(LA, removedLocation).forEach(foundGraph -> {
+				// > remove any nodes this rail was part of...
+				final var removedNode = foundGraph.locateNode(removedLocation);
+				if (removedNode == null)
+					return;
+				foundGraph.removeNode(LA, removedLocation);
+				M.sync.nodeRemoved(foundGraph, removedNode);
+				if (!foundGraph.isEmpty())
+					return;
+				M.removeGraphAndGroup(foundGraph);
+				M.sync.graphRemoved(foundGraph);
+			}))
+			.flatMap(removedEnd -> removedEnd.allAdjacent().stream())
+			.collect(Collectors.toSet()); // dedup is essential in order to avoid redundant onRailAdd call
+
+		// > re-run railAdded for any track that was disconnected from this track
+		positionsToUpdate.stream()
+			.filter(blockPos -> !blockPos.equals(BP))
+			.map(blockPos -> onRailAdded(LA, blockPos, LA.getBlockState(blockPos)))
+			.filter(Objects::nonNull)
+			.forEach(railGraph -> M.updateSplitGraph(LA, railGraph));
+		// > check updated graph for segmentation, if any. ^^^
+
+		M.markTracksDirty();
+	}
+
+	private @NotNull Set<TrackGraph> removeReachableNodes(@NotNull Queue<FrontierEntry> frontier) {
+		final var visited = new HashSet<DiscoveredLocation>();
+		final var connectedGraphs = new HashSet<TrackGraph>();
+
+		withThreshold(kMaxThreshold, frontier, entry -> {
+			final var graphs = M.getGraphs(LA, entry.current);
+			graphs.forEach(graph -> {
+				final var node = graph.locateNode(entry.current);
+				graph.removeNode(LA, entry.current);
+				// node can be null if the node2graph cache has a stale entry pointing to a
+				// graph
+				// that no longer contains this location
+				// (e.g. after a graph merge/split that cleared nodes without going through
+				// removeNode).
+				//
+				// usually it won't happen. nonetheless here we suppress a NPE into
+				// TrackGraphSync, and log it for diags.
+				// if the warning triggered, code has somewhere messed up.
+				if (node == null) {
+					L.warn("node2graph cache inconsistency: graph {} returned by getGraphs " +
+					       "but locateNode({}) returned null; skipping nodeRemoved sync.", graph.id, entry.current);
+					connectedGraphs.add(graph);
+					return;
 				}
-		} else if (connectedGraphs.size() == 1) {
-			graph = connectedGraphs.stream()
-				.findFirst()
-				.get();
-		} else
-			manager.putGraphWithDefaultGroup(graph = new TrackGraph());
+				M.sync.nodeRemoved(graph, node);
+				connectedGraphs.add(graph);
+			});
 
-		DiscoveredLocation startNode = null;
+			// if this location was already a graph node, no need expand the BFS past it;
+			// it was already a boundary of the previous graph structure.
+			if (!graphs.isEmpty()) return;
 
-		// 2. Find the first graph node candidate nearby
+			final var connectedLocs = ITrackBlock.walkConnectedTracks(LA, entry.current, false);
+			if (entry.previous != null)
+				connectedLocs.remove(entry.previous);
 
-		addInitialEndsOf(reader, pos, state, track, frontier, true);
+			BFS(frontier, visited, entry, connectedLocs);
+		}, () -> L.warn("threshold reached while removing reachable nodes, aborting search."));
 
-		emergencyExit = 1000;
-		while (!frontier.isEmpty()) {
-			if (emergencyExit-- == 0)
-				break;
+		return connectedGraphs;
+	}
 
-			FrontierEntry entry = frontier.remove(0);
-			Collection<DiscoveredLocation> ends = ITrackBlock.walkConnectedTracks(reader, entry.currentNode, false);
-			boolean first = entry.prevNode == null;
+	private @NotNull TrackGraph canonicalizeGraph(@NotNull Set<TrackGraph> connectedGraphs) {
+		// remove empty graphs, unless it's the only graph left
+		connectedGraphs.removeIf(railGraph -> {
+			if (!railGraph.isEmpty() || connectedGraphs.size() == 1) return false;
+			M.removeGraphAndGroup(railGraph);
+			M.sync.graphRemoved(railGraph);
+			return true;
+		});
+
+		final var canonical = connectedGraphs.stream()
+			.findFirst()
+			.orElseGet(() -> M.putGraphWithDefaultGroup(new TrackGraph()));
+
+		connectedGraphs.stream().skip(1).forEach(other -> {
+			NeoForge.EVENT_BUS.post(new TrackGraphMergeEvent(other, canonical));
+			other.transferAll(canonical);
+			M.removeGraphAndGroup(other);
+			M.sync.graphRemoved(other);
+		});
+
+		return canonical;
+	}
+
+	private @Nullable DiscoveredLocation getStartNode(Queue<FrontierEntry> frontier) {
+		final var visited = new HashSet<DiscoveredLocation>();
+
+		return withThreshold(kMaxThreshold, frontier, entry -> {
+			final var connectedLocs = ITrackBlock.walkConnectedTracks(LA, entry.current, false);
+			final var first = entry.previous == null;
 			if (!first)
-				ends.remove(entry.prevNode);
-			if (isValidGraphNodeLocation(entry.currentNode, ends, first)) {
-				startNode = entry.currentNode;
-				break;
-			}
+				connectedLocs.remove(entry.previous);
+			if (eligibleAsNode(entry.current, connectedLocs, first))
+				return entry.current;
 
-			continueSearch(frontier, visited, entry, ends);
-		}
+			BFS(frontier, visited, entry, connectedLocs);
+			return null;
+		}, () -> L.warn("threshold reached while finding start node, aborting search."));
+	}
 
-		frontier.clear();
-		Set<TrackNode> addedNodes = new HashSet<>();
+	private @NotNull Set<TrackNode> buildGraph(@NotNull TrackGraph graph, @NotNull DiscoveredLocation startNode) {
+		final var addedNodes = new HashSet<TrackNode>();
+		final var frontiers = new ArrayDeque<FrontierEntry>();
 		graph.createNodeIfAbsent(startNode);
-		frontier.add(new FrontierEntry(startNode, null, startNode));
+		frontiers.add(new FrontierEntry(startNode, null, startNode));
 
-		// 3. Build up the graph via all connected nodes
-
-		emergencyExit = 1000;
-		while (!frontier.isEmpty()) {
-			if (emergencyExit-- == 0)
-				break;
-
-			FrontierEntry entry = frontier.remove(0);
-			DiscoveredLocation parentNode = entry.parentNode;
-			Collection<DiscoveredLocation> ends = ITrackBlock.walkConnectedTracks(reader, entry.currentNode, false);
-			boolean first = entry.prevNode == null;
+		withThreshold(kMaxThreshold, frontiers, entry -> {
+			// var parent = Objects.requireNonNull(entry.parent, "manual CFG inspection: never fails");
+			var parent = entry.parent;
+			final var connectedLocs = ITrackBlock.walkConnectedTracks(LA, entry.current, false);
+			final var first = entry.previous == null;
 			if (!first)
-				ends.remove(entry.prevNode);
+				connectedLocs.remove(entry.previous);
 
-			if (isValidGraphNodeLocation(entry.currentNode, ends, first) && entry.currentNode != startNode) {
-				boolean nodeIsNew = graph.createNodeIfAbsent(entry.currentNode);
-				graph.connectNodes(reader, parentNode, entry.currentNode, entry.currentNode.getTurn());
-				addedNodes.add(graph.locateNode(entry.currentNode));
-				parentNode = entry.currentNode;
-				if (!nodeIsNew)
-					continue;
+			if (eligibleAsNode(entry.current, connectedLocs, first) && entry.current != startNode) {
+				final var added = graph.createNodeIfAbsent(entry.current);
+				//noinspection DataFlowIssue
+				graph.connectNodes(LA, parent, entry.current, entry.current.getTurn());
+				addedNodes.add(graph.locateNode(entry.current));
+				parent = entry.current;
+				if (!added) return;
 			}
 
-			continueSearchWithParent(frontier, entry, parentNode, ends);
-		}
+			//noinspection DataFlowIssue
+			BFS(frontiers, entry, connectedLocs, parent);
+		}, () -> L.warn("threshold reached while building graph from nodes, aborting."));
 
-		manager.markTracksDirty();
-		for (TrackNode trackNode : addedNodes)
-			SignalPropagator.notifySignalsOfNewNode(graph, trackNode);
-		return graph;
+		return addedNodes;
 	}
 
-	private static void addInitialEndsOf(LevelAccessor reader, BlockPos pos, BlockState state, ITrackBlock track,
-		List<FrontierEntry> frontier, boolean ignoreTurns) {
-		for (DiscoveredLocation initial : track.getConnected(reader, pos, state, ignoreTurns, null)) {
-			frontier.add(new FrontierEntry(null, null, initial));
-		}
+	private @NotNull Queue<FrontierEntry> getFrontiers(boolean ignoreTurns) {
+		return TB.getConnected(LA, BP, BS, ignoreTurns, null).stream()
+			.map(location -> new FrontierEntry(null, null, location))
+			.collect(Collectors.toCollection(ArrayDeque::new));
 	}
 
-	private static void continueSearch(List<FrontierEntry> frontier, Set<DiscoveredLocation> visited,
-		FrontierEntry entry, Collection<DiscoveredLocation> ends) {
-		for (DiscoveredLocation location : ends)
-			if (visited.add(location))
-				frontier.add(new FrontierEntry(null, entry.currentNode, location));
+	private static void BFS(@NotNull Queue<FrontierEntry> frontiers, @NotNull Set<DiscoveredLocation> visited,
+	                        @NotNull FrontierEntry entry, @NotNull Collection<DiscoveredLocation> connectedLocs) {
+		connectedLocs.stream()
+			.filter(visited::add)
+			.map(location -> new FrontierEntry(null, entry.current, location))
+			.forEach(frontiers::add);
 	}
 
-	private static void continueSearchWithParent(List<FrontierEntry> frontier, FrontierEntry entry,
-		DiscoveredLocation parentNode, Collection<DiscoveredLocation> ends) {
-		for (DiscoveredLocation location : ends)
-			frontier.add(new FrontierEntry(parentNode, entry.currentNode, location));
+	private static void BFS(@NotNull Queue<FrontierEntry> frontiers, @NotNull FrontierEntry entry,
+	                        @NotNull Collection<DiscoveredLocation> connectedLocs, @NotNull DiscoveredLocation parent) {
+		connectedLocs.stream()
+			.map(location -> new FrontierEntry(parent, entry.current, location))
+			.forEach(frontiers::add);
 	}
 
-	public static boolean isValidGraphNodeLocation(DiscoveredLocation location, Collection<DiscoveredLocation> next,
-		boolean first) {
-		int size = next.size() - (first ? 1 : 0);
+	/**
+	 * Checks whether the node position falls on a chunk boundary (% 16 == 0).
+	 * <p>
+	 * This is necessary for connection search as well as AABB spatial boundings.
+	 */
+	private static boolean isChunkBoundaryNode(@NotNull Vec3 vec) {
+		final var centeredX = !Mth.equal(vec.x, Math.round(vec.x));
+		final var centeredZ = !Mth.equal(vec.z, Math.round(vec.z));
+		if (centeredX && !centeredZ)
+			return Math.round(vec.z) % 16 == 0;
+		return Math.round(vec.x) % 16 == 0;
+	}
+
+	private static boolean eligibleAsNode(@NotNull DiscoveredLocation location,
+	                                      @NotNull Collection<DiscoveredLocation> next, boolean first) {
+		final var size = next.size() - (first ? 1 : 0);
 		if (size != 1)
 			return true;
 		if (location.shouldForceNode())
 			return true;
 		if (location.differentMaterials())
 			return true;
-		if (next.stream()
-			.anyMatch(DiscoveredLocation::shouldForceNode))
+		if (next.stream().anyMatch(DiscoveredLocation::shouldForceNode))
 			return true;
 
-		Vec3 direction = location.getDirection();
-		if (direction != null && next.stream()
-			.anyMatch(dl -> dl.notInLineWith(direction)))
+		final var direction = location.getDirection();
+		if (direction != null && next.stream().anyMatch(dl -> dl.notInLineWith(direction)))
 			return true;
 
-		Vec3 vec = location.getLocation();
-		boolean centeredX = !Mth.equal(vec.x, Math.round(vec.x));
-		boolean centeredZ = !Mth.equal(vec.z, Math.round(vec.z));
-		if (centeredX && !centeredZ)
-			return ((int) Math.round(vec.z)) % 16 == 0;
-		return ((int) Math.round(vec.x)) % 16 == 0;
+		return isChunkBoundaryNode(location.getLocation());
+	}
+
+	/**
+	 * see {@link #withThreshold(int, Queue, Function, Runnable)} for details.
+	 */
+	private static <T> void withThreshold(
+		int maxIterations,
+		@NotNull Queue<T> frontiers,
+		@NotNull Consumer<T> processor,
+		@NotNull Runnable callback) {
+		withThreshold(maxIterations, frontiers, entry -> {
+			processor.accept(entry);
+			return null;
+		}, callback);
+	}
+
+	/**
+	 * @param <T>           type
+	 * @param <R>           return type
+	 * @param frontiers     process object
+	 * @param maxIterations threshold
+	 * @param processor     loop logic
+	 * @param callback      callback if threshold reached
+	 * @return the result of the processor, or null if the queue was exhausted or
+	 * the threshold was reached
+	 */
+	private static <T, R> @Nullable R withThreshold(int maxIterations, @NotNull Queue<T> frontiers,
+	                                                @NotNull Function<T, R> processor, @NotNull Runnable callback) {
+		var budget = 0;
+
+		while (!frontiers.isEmpty()) {
+			if (budget++ >= maxIterations) {
+				callback.run();
+				break;
+			}
+
+			final T entry = frontiers.poll();
+			final R result = processor.apply(entry);
+			if (result != null)
+				return result;
+		}
+
+		return null;
 	}
 
 }

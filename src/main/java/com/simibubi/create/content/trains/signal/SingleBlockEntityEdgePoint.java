@@ -39,6 +39,12 @@ public abstract class SingleBlockEntityEdgePoint extends TrackEdgePoint {
 
 	@Override
 	public void invalidate(LevelAccessor level) {
+		// blockEntityPos/blockEntityDimension are null if blockEntityAdded() was never
+		// called (i.e., the edge point was added to the graph before the block entity
+		// fully initialized).
+		// FIXME: this is just to prevent crash and wont solve underlying issue.
+		if (blockEntityPos == null || blockEntityDimension == null)
+			return;
 		invalidateAt(level, blockEntityPos);
 	}
 

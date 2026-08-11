@@ -1,8 +1,10 @@
 package com.simibubi.create.content.trains;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -11,6 +13,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.apache.commons.lang3.mutable.MutableObject;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import com.simibubi.create.CreateClient;
@@ -43,6 +46,18 @@ public class GlobalRailwayManager {
 	public Map<UUID, SignalEdgeGroup> signalEdgeGroups;
 	public Map<UUID, Train> trains;
 	public TrackGraphSync sync;
+	/**
+	 * cache, O(1) lookup for graphs containing a node, updated on graph/node add/remove.
+	 * <p>
+	 * used to avoid iterating all graphs (O(N), where N is the number of graphs) every time a node is looked up,
+	 * when looking up a node in function {@link #getGraph(LevelAccessor, TrackNodeLocation)}.
+	 *
+	 * @implNote Multiple graphs can cross over at the same node but keep its independence; e.g., portal tracks.
+	 * Also, during track propagation, temporary boundary nodes are evaluated
+	 * while two graphs are being merged or split before final consolidation.
+	 */
+	private @NotNull
+	final Map<TrackNodeLocation, Set<TrackGraph>> node2graph = new HashMap<>();
 
 	private List<Train> movingTrains;
 	private List<Train> waitingTrains;
@@ -53,6 +68,26 @@ public class GlobalRailwayManager {
 
 	public GlobalRailwayManager() {
 		cleanUp();
+	}
+
+	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+		node2graph.computeIfAbsent(location, k -> new HashSet<>()).add(graph);
+	}
+
+	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
+		locations.forEach(location -> onNodeAdded(graph, location));
+	}
+
+	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+		final var S = node2graph.get(location);
+		if (S == null) return;
+		S.remove(graph);
+		if (S.isEmpty())
+			node2graph.remove(location);
+	}
+
+	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
+		locations.forEach(location -> onNodeRemoved(graph, location));
 	}
 
 	public void playerLogin(Player player) {
@@ -76,7 +111,7 @@ public class GlobalRailwayManager {
 		}
 	}
 
-	public void playerLogout(Player player) {
+	public void playerLogout(@SuppressWarnings("unused") Player player) {
 	}
 
 	public void levelLoaded(LevelAccessor level) {
@@ -96,6 +131,8 @@ public class GlobalRailwayManager {
 		trackNetworks = savedData.getTrackNetworks();
 		signalEdgeGroups = savedData.getSignalBlocks();
 		movingTrains.addAll(trains.values());
+		node2graph.clear();
+		trackNetworks.values().forEach(graph -> onNodeAdded(graph, graph.getNodes()));
 	}
 
 	public void cleanUp() {
@@ -105,6 +142,7 @@ public class GlobalRailwayManager {
 		sync = new TrackGraphSync();
 		movingTrains = new LinkedList<>();
 		waitingTrains = new LinkedList<>();
+		node2graph.clear();
 		GlobalTrainDisplayData.statusByDestination.clear();
 	}
 
@@ -136,15 +174,18 @@ public class GlobalRailwayManager {
 		});
 	}
 
-	public void putGraphWithDefaultGroup(TrackGraph graph) {
+	public @NotNull TrackGraph putGraphWithDefaultGroup(@NotNull TrackGraph graph) {
 		SignalEdgeGroup group = new SignalEdgeGroup(graph.id);
 		signalEdgeGroups.put(graph.id, group.asFallback());
 		sync.edgeGroupCreated(graph.id, group.color);
 		putGraph(graph);
+		return graph;
 	}
 
-	public void putGraph(TrackGraph graph) {
+	public void putGraph(@NotNull TrackGraph graph) {
 		trackNetworks.put(graph.id, graph);
+		onNodeAdded(graph, graph.getNodes());
+
 		markTracksDirty();
 	}
 
@@ -154,40 +195,55 @@ public class GlobalRailwayManager {
 		removeGraph(graph);
 	}
 
-	public void removeGraph(TrackGraph graph) {
+	public void removeGraph(@NotNull TrackGraph graph) {
 		trackNetworks.remove(graph.id);
+		onNodeRemoved(graph, graph.getNodes());
+
 		markTracksDirty();
 	}
 
-	public void updateSplitGraph(LevelAccessor level, TrackGraph graph) {
-		Set<TrackGraph> disconnected = graph.findDisconnectedGraphs(level, null);
-		for (TrackGraph d : disconnected) {
-			putGraphWithDefaultGroup(d);
-		}
-		if (!disconnected.isEmpty()) {
-			sync.graphSplit(graph, disconnected);
-			markTracksDirty();
-		}
+	public void updateSplitGraph(@NotNull LevelAccessor level, @NotNull TrackGraph graph) {
+		final var disconnected = graph.findDisconnectedGraphs(level, null);
+
+		if (disconnected.isEmpty()) return;
+
+		disconnected.forEach(this::putGraphWithDefaultGroup);
+
+		sync.graphSplit(graph, disconnected);
+		markTracksDirty();
 	}
 
-	@Nullable
-	public TrackGraph getGraph(LevelAccessor level, TrackNodeLocation vertex) {
-		if (trackNetworks == null)
+	public @Nullable TrackGraph getGraph(@SuppressWarnings("unused") LevelAccessor level, TrackNodeLocation vertex) {
+		if (vertex == null || trackNetworks == null)
 			return null;
-		for (TrackGraph railGraph : trackNetworks.values())
-			if (railGraph.locateNode(vertex) != null)
+
+		final var set = node2graph.get(vertex);
+		if (set != null && !set.isEmpty())
+			return set.iterator().next();
+
+		for (var railGraph : trackNetworks.values()) {
+			if (railGraph.locateNode(vertex) != null) {
+				onNodeAdded(railGraph, vertex);
 				return railGraph;
+			}
+		}
 		return null;
 	}
 
-	public List<TrackGraph> getGraphs(LevelAccessor level, TrackNodeLocation vertex) {
-		if (trackNetworks == null)
+	public @NotNull List<TrackGraph> getGraphs(@SuppressWarnings("unused") LevelAccessor level, @Nullable TrackNodeLocation vertex) {
+		if (vertex == null || trackNetworks == null)
 			return Collections.emptyList();
-		ArrayList<TrackGraph> intersecting = new ArrayList<>();
-		for (TrackGraph railGraph : trackNetworks.values())
-			if (railGraph.locateNode(vertex) != null)
-				intersecting.add(railGraph);
-		return intersecting;
+
+		var set = node2graph.get(vertex);
+		if (set != null && !set.isEmpty())
+			// hit
+			return new ArrayList<>(set);
+
+		// not hit, calculate intersections
+		return trackNetworks.values().stream()
+			.filter(railGraph -> railGraph.locateNode(vertex) != null)
+			.peek(railGraph -> onNodeAdded(railGraph, vertex))
+			.toList();
 	}
 
 	public void tick(Level level) {

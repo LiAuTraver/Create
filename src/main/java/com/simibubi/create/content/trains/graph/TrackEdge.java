@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import com.google.common.collect.ImmutableList;
@@ -54,6 +55,21 @@ public class TrackEdge {
 
 	public BezierConnection getTurn() {
 		return turn;
+	}
+
+	private @Nullable AABB cachedBounds;
+
+	public @NotNull AABB getBounds() {
+		if (cachedBounds != null)
+			return cachedBounds;
+		if (isTurn()) {
+			cachedBounds = turn.getBounds();
+		} else {
+			Vec3 v1 = node1.location.getLocation();
+			Vec3 v2 = node2.location.getLocation();
+			cachedBounds = new AABB(v1, v2).inflate(0.5); // make it spatial as well as avoid zero size
+		}
+		return cachedBounds;
 	}
 
 	public Vec3 getDirection(boolean fromFirst) {
