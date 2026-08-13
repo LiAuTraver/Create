@@ -9,7 +9,6 @@ import java.util.Objects;
 import java.util.UUID;
 
 import com.simibubi.create.AllPackets;
-import com.simibubi.create.Create;
 import com.simibubi.create.content.trains.GlobalRailwayManager;
 import com.simibubi.create.content.trains.signal.TrackEdgePoint;
 import com.simibubi.create.content.trains.track.BezierConnection;
@@ -183,8 +182,7 @@ public class TrackGraphSyncPacket extends TrackGraphPacket {
 
 		if (fullWipe) {
 			manager.removeGraph(graph);
-			graph = Create.RAILWAYS.sided(null)
-				.getOrCreateGraph(graphId, netId);
+			graph = manager.getOrCreateGraph(graphId, netId);
 		}
 
 		for (int nodeId : removedNodes) {

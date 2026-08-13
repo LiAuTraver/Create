@@ -355,7 +355,7 @@ public class TrackGraph {
 
 		TrackNodeLocation nodeLoc = node.getLocation();
 		Map<TrackNode, TrackEdge> connections = getConnectionsFrom(node);
-		Map<UUID, Train> trains = Create.RAILWAYS.sided(level).trains;
+		Map<UUID, Train> trains = Create.RAILWAYS.trains;
 
 		if (!connections.isEmpty()) {
 			target.connectionsByNode.put(node, connections);

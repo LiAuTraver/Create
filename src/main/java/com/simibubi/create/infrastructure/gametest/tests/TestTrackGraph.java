@@ -74,8 +74,13 @@ import org.slf4j.Logger;
  * </li>
  * <p>
  * subsequent tests indicate that, thanks to the node2graph cache, the delay would be half as original.
- * as for 110k node, the node2graph field would increase memory like 6MiB
+ * as for 110k node, the node2graph field would increase memory like 6MiB(per side, hence 12MiB in singleplayer)
  * (per: 3 unique ResourceKey, 4 int, 1 HashSet, 1 weakref) , which is almost negligible.
+ * <p>
+ * another panelty is the track graph check which verifies the graph's ownership, also emerged via node2graph field.
+ * in order to avoid corss-referencing when running singleplayer; it shouldnt matter when the server side is dedicated.
+ * the panelty is O(1), called twice per placing, and 8(or 6?) per removal. so bad we had to pay the cost even when running them separate.
+ * in theory, there would be slight overhead when total number of graph is low;
  * <p>
  * TODO: test beizer curve case; theoritically it should drop from O(n^2) to O(n) + time(AABB testing).
  */
@@ -88,21 +93,6 @@ public class TestTrackGraph {
 	private static final @SuppressWarnings("unused") Void V = denoiseLogs();
 
 	private record LoadResult(List<TrackGraph> GL, int TN, Path SP) {
-	}
-
-	private static Path findDataFile() {
-		final var dir = System.getProperty("create.testDataDir");
-		final var candidates = new ArrayList<Path>();
-
-		if (dir != null && !dir.isBlank()) {
-			candidates.add(Paths.get(dir, "create_tracks_test.dat"));
-			candidates.add(Paths.get(dir, "create_tracks.dat"));
-		}
-
-		candidates.add(Paths.get("tmp", "create_tracks_test.dat"));
-		candidates.add(Paths.get("tmp", "create_tracks.dat"));
-
-		return candidates.stream().filter(Files::exists).findFirst().orElse(null);
 	}
 
 	private static Void denoiseLogs() {
@@ -139,6 +129,18 @@ public class TestTrackGraph {
 			L.warn("Failed to denoise logs for track graph tests", e);
 		}
 		return null;
+	}
+
+	private static Path findDataFile() {
+		final var dir = System.getProperty("create.testDataDir");
+		final var candidates = new ArrayList<Path>();
+
+		if (dir != null && !dir.isBlank()) {
+			candidates.add(Paths.get(dir, "create_tracks.dat"));
+		}
+		candidates.add(Paths.get("tmp", "create_tracks.dat"));
+
+		return candidates.stream().filter(Files::exists).findFirst().orElse(null);
 	}
 
 	/**
@@ -267,8 +269,8 @@ public class TestTrackGraph {
 		final var loc2 = new TrackNodeLocation(new Vec3(100, 10, 102)).in(level);
 
 
-		final var node1 = new TrackNode(loc1, TrackGraph.nodeNetIdGenerator.incrementAndGet(), N);
-		final var node2 = new TrackNode(loc2, TrackGraph.nodeNetIdGenerator.incrementAndGet(), N);
+		final var node1 = new TrackNode(loc1, TrackGraph.nextNodeId(), N);
+		final var node2 = new TrackNode(loc2, TrackGraph.nextNodeId(), N);
 
 		S.addNode(node1);
 		S.addNode(node2);
@@ -300,7 +302,7 @@ public class TestTrackGraph {
 		final var T = new TrackGraph();
 
 		final var loc = new TrackNodeLocation(new Vec3(200, 10, 200)).in(level);
-		final var node = new TrackNode(loc, TrackGraph.nodeNetIdGenerator.incrementAndGet(), N);
+		final var node = new TrackNode(loc, TrackGraph.nextNodeId(), N);
 
 		S.addNode(node);
 
@@ -362,7 +364,7 @@ public class TestTrackGraph {
 	}
 
 	// 8500ms~9000ms original
-	// 3500ms~4500ms, X-axis, patched
+	// 4000ms~4500ms, X-axis, patched
 	@SuppressWarnings("unused")
 	@GameTest(template = "empty", timeoutTicks = THIRTY_SECONDS)
 	public static void withinNonOverlapping(CreateGameTestHelper H) {
@@ -405,7 +407,7 @@ public class TestTrackGraph {
 	}
 
 	// 17500ms, original
-	// 7000ms~9500ms, patched
+	// 8000ms~9500ms, patched
 	@SuppressWarnings("unused")
 	@GameTest(template = "empty", timeoutTicks = THIRTY_SECONDS)
 	public static void withinNonOverlappingCrossing(CreateGameTestHelper H) {
@@ -463,7 +465,7 @@ public class TestTrackGraph {
 		final var largeGraph = new TrackGraph();
 		IntStream.range(0, 100000)
 			.mapToObj(i -> new TrackNodeLocation(new Vec3(1000 + i * 2, 10, 1000)).in(level))
-			.map(loc -> new TrackNode(loc, TrackGraph.nodeNetIdGenerator.incrementAndGet(), N))
+			.map(loc -> new TrackNode(loc, TrackGraph.nextNodeId(), N))
 			.forEach(largeGraph::addNode);
 
 		withGraphs(() -> {

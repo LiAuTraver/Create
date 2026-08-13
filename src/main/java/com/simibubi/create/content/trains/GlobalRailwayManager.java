@@ -42,7 +42,7 @@ import net.neoforged.api.distmarker.OnlyIn;
 
 public class GlobalRailwayManager {
 
-	public Map<UUID, TrackGraph> trackNetworks;
+	public @NotNull Map<UUID, TrackGraph> trackNetworks;
 	public Map<UUID, SignalEdgeGroup> signalEdgeGroups;
 	public Map<UUID, Train> trains;
 	public TrackGraphSync sync;
@@ -55,6 +55,10 @@ public class GlobalRailwayManager {
 	 * @implNote Multiple graphs can cross over at the same node but keep its independence; e.g., portal tracks.
 	 * Also, during track propagation, temporary boundary nodes are evaluated
 	 * while two graphs are being merged or split before final consolidation.
+	 * <p>
+	 * The is locally updated and lazily updated, server and client maintains different instances of it but kept in sync.
+	 * <p>
+	 * The memory cost of the cache is negligible -- described in {@link com.simibubi.create.infrastructure.gametest.tests.TestTrackGraph}
 	 */
 	private @NotNull
 	final Map<TrackNodeLocation, Set<TrackGraph>> node2graph = new HashMap<>();
@@ -70,20 +74,39 @@ public class GlobalRailwayManager {
 		cleanUp();
 	}
 
+	protected void do_add_node(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+		node2graph.computeIfAbsent(location, $ -> new HashSet<>()).add(graph);
+	}
+
 	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
-		node2graph.computeIfAbsent(location, k -> new HashSet<>()).add(graph);
+		// only index graphs that actually belong to this manager instance.
+		// the singleplayer (i.e., integrated server) mode, client-side packet processing creates client TrackGraph
+		// instances with the same UUID as server graphs. and reference would be passed by as well as `increase` the RefCnt.
+		// this results in cross-references between client and server i.e., polluting the node2graph map; massed up horribly.
+		//
+		// performance panelty for the check: O(1), yet still noticable in our tests: time cost slightly increases.
+		if (trackNetworks.get(graph.id) != graph)
+			return;
+		do_add_node(graph, location);
 	}
 
-	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
-		locations.forEach(location -> onNodeAdded(graph, location));
+	protected void onNodeAdded(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
+		locations.forEach(location -> do_add_node(graph, location));
 	}
 
-	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+	public void do_remove_node(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
 		final var S = node2graph.get(location);
 		if (S == null) return;
 		S.remove(graph);
 		if (S.isEmpty())
 			node2graph.remove(location);
+	}
+
+	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+		// ditto.
+		if (trackNetworks.get(graph.id) != graph)
+			return;
+		do_remove_node(graph, location);
 	}
 
 	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
@@ -214,7 +237,7 @@ public class GlobalRailwayManager {
 	}
 
 	public @Nullable TrackGraph getGraph(@SuppressWarnings("unused") LevelAccessor level, TrackNodeLocation vertex) {
-		if (vertex == null || trackNetworks == null)
+		if (vertex == null)
 			return null;
 
 		final var set = node2graph.get(vertex);
@@ -231,7 +254,7 @@ public class GlobalRailwayManager {
 	}
 
 	public @NotNull List<TrackGraph> getGraphs(@SuppressWarnings("unused") LevelAccessor level, @Nullable TrackNodeLocation vertex) {
-		if (vertex == null || trackNetworks == null)
+		if (vertex == null)
 			return Collections.emptyList();
 
 		var set = node2graph.get(vertex);

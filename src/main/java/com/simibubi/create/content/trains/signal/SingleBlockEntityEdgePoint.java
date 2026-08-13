@@ -1,6 +1,9 @@
 package com.simibubi.create.content.trains.signal;
 
+import com.simibubi.create.Create;
 import com.simibubi.create.content.trains.graph.DimensionPalette;
+import com.simibubi.create.content.trains.track.TrackTargetingBehaviour;
+import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 
 import net.createmod.catnip.nbt.NBTHelper;
 import net.minecraft.core.BlockPos;
@@ -39,12 +42,29 @@ public abstract class SingleBlockEntityEdgePoint extends TrackEdgePoint {
 
 	@Override
 	public void invalidate(LevelAccessor level) {
-		// blockEntityPos/blockEntityDimension are null if blockEntityAdded() was never
-		// called (i.e., the edge point was added to the graph before the block entity
-		// fully initialized).
-		// FIXME: this is just to prevent crash and wont solve underlying issue.
-		if (blockEntityPos == null || blockEntityDimension == null)
+		if (blockEntityPos == null) {
+			// blockEntityPos is null if blockEntityAdded() was never called.
+			// ^^^ fixed(maybe?), but kept the check otherwise NPE.
+			Create.LOGGER.warn(
+				"SingleBlockEntityEdgePoint.invalidate() called with null blockEntityPos. " +
+				"This should never happen and it means the code messed up and the game would probably crash soon"
+			);
 			return;
+		}
+		if (blockEntityDimension == null) {
+			// blockEntityPos is known but dimension wasn't captured
+			// we still need the block entity to re-register itself on the next tick
+			// ^^^ fixed(maybe?), keep here as well.
+			Create.LOGGER.warn(
+				"SingleBlockEntityEdgePoint.invalidate() called with null blockEntityDimension." +
+				"This should never happen and it means the code messed up and the game would probably crash soon"
+			);
+			TrackTargetingBehaviour<?> behaviour =
+				BlockEntityBehaviour.get(level, blockEntityPos, TrackTargetingBehaviour.TYPE);
+			if (behaviour != null)
+				behaviour.invalidateEdgePoint(null);
+			return;
+		}
 		invalidateAt(level, blockEntityPos);
 	}
 
@@ -65,6 +85,8 @@ public abstract class SingleBlockEntityEdgePoint extends TrackEdgePoint {
 	@Override
 	public void write(CompoundTag nbt, HolderLookup.Provider registries, DimensionPalette dimensions) {
 		super.write(nbt, registries, dimensions);
+//		assert blockEntityPos != null ;
+//		assert blockEntityDimension != null;
 		nbt.put("BlockEntityPos", NbtUtils.writeBlockPos(blockEntityPos));
 		nbt.putInt("BlockEntityDimension", dimensions.encode(blockEntityDimension));
 	}
