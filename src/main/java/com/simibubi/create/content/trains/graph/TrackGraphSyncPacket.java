@@ -188,13 +188,13 @@ public class TrackGraphSyncPacket extends TrackGraphPacket {
 		for (int nodeId : removedNodes) {
 			TrackNode node = graph.getNode(nodeId);
 			if (node != null)
-				graph.removeNode(null, node.getLocation());
+				graph.removeNode(manager, node.getLocation());
 		}
 
 		for (Entry<Integer, Pair<TrackNodeLocation, Vec3>> entry : addedNodes.entrySet()) {
 			Integer nodeId = entry.getKey();
 			Pair<TrackNodeLocation, Vec3> nodeLocation = entry.getValue();
-			graph.loadNode(nodeLocation.getFirst(), nodeId, nodeLocation.getSecond());
+			graph.loadNode(manager, nodeLocation.getFirst(), nodeId, nodeLocation.getSecond());
 		}
 
 		for (Pair<Pair<Couple<Integer>, TrackMaterial>, BezierConnection> pair : addedEdges) {
@@ -216,7 +216,7 @@ public class TrackGraphSyncPacket extends TrackGraphPacket {
 		handleEdgeData(manager, graph);
 
 		if (!splitSubGraphs.isEmpty())
-			graph.findDisconnectedGraphs(null, splitSubGraphs)
+			graph.findDisconnectedGraphs(manager, splitSubGraphs)
 				.forEach(manager::putGraph);
 	}
 

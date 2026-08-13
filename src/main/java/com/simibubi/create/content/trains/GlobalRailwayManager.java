@@ -75,23 +75,7 @@ public class GlobalRailwayManager {
 	}
 
 	protected void do_add_node(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
-		node2graph.computeIfAbsent(location, $ -> new HashSet<>()).add(graph);
-	}
-
-	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
-		// only index graphs that actually belong to this manager instance.
-		// the singleplayer (i.e., integrated server) mode, client-side packet processing creates client TrackGraph
-		// instances with the same UUID as server graphs. and reference would be passed by as well as `increase` the RefCnt.
-		// this results in cross-references between client and server i.e., polluting the node2graph map; massed up horribly.
-		//
-		// performance panelty for the check: O(1), yet still noticable in our tests: time cost slightly increases.
-		if (trackNetworks.get(graph.id) != graph)
-			return;
-		do_add_node(graph, location);
-	}
-
-	protected void onNodeAdded(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
-		locations.forEach(location -> do_add_node(graph, location));
+		node2graph.computeIfAbsent(location, $ -> new HashSet<>(1)).add(graph);
 	}
 
 	public void do_remove_node(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
@@ -102,10 +86,19 @@ public class GlobalRailwayManager {
 			node2graph.remove(location);
 	}
 
+	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
+//		// see the comments in 681fd6e8561729a80af0e9fcf5e6ef6d8985ae58 for more information.
+//		assert trackNetworks.get(graph.id) == graph;
+		do_add_node(graph, location);
+	}
+
+	public void onNodeAdded(@NotNull TrackGraph graph, @NotNull Collection<TrackNodeLocation> locations) {
+		locations.forEach(location -> do_add_node(graph, location));
+	}
+
 	public void onNodeRemoved(@NotNull TrackGraph graph, @NotNull TrackNodeLocation location) {
-		// ditto.
-		if (trackNetworks.get(graph.id) != graph)
-			return;
+//		// ditto.
+//		assert trackNetworks.get(graph.id) == graph;
 		do_remove_node(graph, location);
 	}
 
@@ -226,7 +219,7 @@ public class GlobalRailwayManager {
 	}
 
 	public void updateSplitGraph(@NotNull LevelAccessor level, @NotNull TrackGraph graph) {
-		final var disconnected = graph.findDisconnectedGraphs(level, null);
+		final var disconnected = graph.findDisconnectedGraphs(this, null);
 
 		if (disconnected.isEmpty()) return;
 

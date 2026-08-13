@@ -17,10 +17,14 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.api.distmarker.OnlyIn;
+
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import com.simibubi.create.Create;
+import com.simibubi.create.content.trains.GlobalRailwayManager;
 import com.simibubi.create.content.trains.entity.Train;
 import com.simibubi.create.content.trains.graph.TrackNodeLocation.DiscoveredLocation;
 import com.simibubi.create.content.trains.signal.SignalEdgeGroup;
@@ -139,46 +143,70 @@ public class TrackGraph {
 		return nodesById.get(netId);
 	}
 
-	public boolean createNodeIfAbsent(DiscoveredLocation location) {
-		if (!addNodeIfAbsent(new TrackNode(location, nextNodeId(), location.normal)))
+	public boolean createNodeIfAbsent(@Nullable LevelAccessor level, @NotNull DiscoveredLocation location) {
+		return createNodeIfAbsent(Create.RAILWAYS.sided(level), location);
+	}
+
+	public boolean createNodeIfAbsent(@NotNull GlobalRailwayManager manager, @NotNull DiscoveredLocation location) {
+		if (!addNodeIfAbsent(manager, new TrackNode(location, nextNodeId(), location.normal)))
 			return false;
 		TrackNode newNode = nodes.get(location);
-		Create.RAILWAYS.sync.nodeAdded(this, newNode);
+		manager.sync.nodeAdded(this, newNode);
 		invalidateBounds();
 		markDirty();
 		return true;
 	}
 
+	/// server-side loadnode
 	public void loadNode(TrackNodeLocation location, int netId, Vec3 normal) {
-		addNode(new TrackNode(location, netId, normal));
+		var node = new TrackNode(location, netId, normal);
+		nodes.put(location, node);
+		nodesById.put(netId, node);
 	}
 
-	public void addNode(@NotNull TrackNode node) {
+	public void loadNode(@NotNull GlobalRailwayManager manager, TrackNodeLocation location, int netId, Vec3 normal) {
+		addNode(manager, new TrackNode(location, netId, normal));
+	}
 
+	/// add node on server-side manager.
+	@OnlyIn(Dist.DEDICATED_SERVER)
+	public void addNode(@NotNull TrackNode node) {
+		addNode(Create.RAILWAYS, node);
+	}
+
+
+	public void addNode(@NotNull GlobalRailwayManager manager, @NotNull TrackNode node) {
 		TrackNodeLocation location = node.getLocation();
 		if (nodes.containsKey(location))
-			removeNode(null, location);
+			removeNode(manager, location);
 		nodes.put(location, node);
 		nodesById.put(node.getNetId(), node);
-		Create.RAILWAYS.onNodeAdded(this, location);
+		manager.onNodeAdded(this, location);
 	}
 
-	public boolean addNodeIfAbsent(@NotNull TrackNode node) {
-
+	public boolean addNodeIfAbsent(@NotNull GlobalRailwayManager manager, @NotNull TrackNode node) {
 		if (nodes.putIfAbsent(node.getLocation(), node) != null)
 			return false;
 		nodesById.put(node.getNetId(), node);
-		Create.RAILWAYS.onNodeAdded(this, node.getLocation());
+		manager.onNodeAdded(this, node.getLocation());
 		return true;
 	}
 
-	public boolean removeNode(@Nullable LevelAccessor level, @NotNull TrackNodeLocation location) {
+	public boolean removeNode(@NotNull LevelAccessor level, @NotNull TrackNodeLocation location) {
+		return removeNode(level, Create.RAILWAYS.sided(level), location);
+	}
+
+	public boolean removeNode(@NotNull GlobalRailwayManager manager, @NotNull TrackNodeLocation location) {
+		return removeNode(null, manager, location);
+	}
+
+	private boolean removeNode(@Nullable LevelAccessor level, @NotNull GlobalRailwayManager manager, @NotNull TrackNodeLocation location) {
 		TrackNode removed = nodes.remove(location);
 		if (removed == null)
 			return false;
-		Create.RAILWAYS.onNodeRemoved(this, location);
+		manager.onNodeRemoved(this, location);
 
-		Map<UUID, Train> trains = Create.RAILWAYS.trains;
+		Map<UUID, Train> trains = manager.trains;
 		for (UUID uuid : trains.keySet()) {
 			Train train = trains.get(uuid);
 			if (train.graph != this)
@@ -206,7 +234,7 @@ public class TrackGraph {
 				TrackNode otherNode = entry.getKey();
 				for (TrackEdgeIntersection intersection : edgeData.getIntersections()) {
 					Couple<TrackNodeLocation> target = intersection.target;
-					TrackGraph graph = Create.RAILWAYS.getGraph(level, target.getFirst());
+					TrackGraph graph = Create.RAILWAYS.sided(level).getGraph(level, target.getFirst());
 					if (graph != null)
 						graph.removeIntersection(intersection, removed, otherNode);
 				}
@@ -252,10 +280,19 @@ public class TrackGraph {
 		return graphNetIdGenerator.incrementAndGet();
 	}
 
+	@OnlyIn(Dist.DEDICATED_SERVER)
 	public void transferAll(TrackGraph toOther) {
+		transferAll(Create.RAILWAYS, toOther);
+	}
+
+	public void transferAll(@NotNull LevelAccessor level, TrackGraph toOther) {
+		transferAll(Create.RAILWAYS.sided(level), toOther);
+	}
+
+	public void transferAll(@NotNull GlobalRailwayManager manager, TrackGraph toOther) {
 		nodes.forEach((loc, node) -> {
-			if (toOther.addNodeIfAbsent(node))
-				Create.RAILWAYS.sync.nodeAdded(toOther, node);
+			if (toOther.addNodeIfAbsent(manager, node))
+				manager.sync.nodeAdded(toOther, node);
 		});
 
 		connectionsByNode.forEach((node1, map) -> map.forEach((node2, edge) -> {
@@ -264,8 +301,8 @@ public class TrackGraph {
 			if (n1 == null || n2 == null)
 				return;
 			if (toOther.putConnection(n1, n2, edge)) {
-				Create.RAILWAYS.sync.edgeAdded(toOther, n1, n2, edge);
-				Create.RAILWAYS.sync.edgeDataChanged(toOther, n1, n2, edge);
+				manager.sync.edgeAdded(toOther, n1, n2, edge);
+				manager.sync.edgeDataChanged(toOther, n1, n2, edge);
 			}
 		}));
 
@@ -275,13 +312,13 @@ public class TrackGraph {
 		// without this, the node2graph cache would keep a stale reference to
 		// this soon-to-be-discarded graph alongside the new owner,
 		// and NPE chaos ensues.
-		Create.RAILWAYS.onNodeRemoved(this, nodes.keySet());
+		manager.onNodeRemoved(this, nodes.keySet());
 
 		nodes.clear();
 		connectionsByNode.clear();
 		toOther.invalidateBounds();
 
-		Map<UUID, Train> trains = Create.RAILWAYS.trains;
+		Map<UUID, Train> trains = manager.trains;
 		for (UUID uuid : trains.keySet()) {
 			Train train = trains.get(uuid);
 			if (train.graph != this)
@@ -290,7 +327,7 @@ public class TrackGraph {
 		}
 	}
 
-	public Set<TrackGraph> findDisconnectedGraphs(@Nullable LevelAccessor level,
+	public Set<TrackGraph> findDisconnectedGraphs(@NotNull GlobalRailwayManager manager,
 	                                              @Nullable Map<Integer, Pair<Integer, UUID>> splitSubGraphs) {
 		Set<TrackGraph> dicovered = new HashSet<>();
 		Set<TrackNodeLocation> vertices = new HashSet<>(nodes.keySet());
@@ -322,7 +359,7 @@ public class TrackGraph {
 						target.setId(ids.getSecond());
 						target.netId = ids.getFirst();
 					}
-					transfer(level, currentNode, target);
+					transfer(manager, currentNode, target);
 				}
 			}
 
@@ -343,19 +380,21 @@ public class TrackGraph {
 
 	public int getChecksum() {
 		if (checksum == 0)
-			checksum = nodes.values()
-				.stream()
-				.collect(Collectors.summingInt(TrackNode::getNetId));
+			checksum = nodes.values().stream().mapToInt(TrackNode::getNetId).sum();
 		return checksum;
 	}
 
-	public void transfer(LevelAccessor level, TrackNode node, TrackGraph target) {
-		target.addNode(node);
+	public void transfer(@Nullable LevelAccessor level, TrackNode node, TrackGraph target) {
+		transfer(level == null ? Create.RAILWAYS.sided(null) : Create.RAILWAYS.sided(level), node, target);
+	}
+
+	public void transfer(@NotNull GlobalRailwayManager manager, TrackNode node, TrackGraph target) {
+		target.addNode(manager, node);
 		target.invalidateBounds();
 
 		TrackNodeLocation nodeLoc = node.getLocation();
 		Map<TrackNode, TrackEdge> connections = getConnectionsFrom(node);
-		Map<UUID, Train> trains = Create.RAILWAYS.trains;
+		Map<UUID, Train> trains = manager.trains;
 
 		if (!connections.isEmpty()) {
 			target.connectionsByNode.put(node, connections);
@@ -368,19 +407,16 @@ public class TrackGraph {
 			}
 		}
 
-		if (level != null)
-			for (UUID uuid : trains.keySet()) {
-				Train train = trains.get(uuid);
-				if (train.graph != this)
-					continue;
-				if (!train.isTravellingOn(node))
-					continue;
-				train.graph = target;
-			}
+		for (UUID uuid : trains.keySet()) {
+			Train train = trains.get(uuid);
+			if (train.graph != this)
+				continue;
+			if (!train.isTravellingOn(node))
+				continue;
+			train.graph = target;
+		}
 
-		// Notify the manager before removing from the internal map so the
-		// node2graph reverse-index is kept consistent (mirrors what removeNode does).
-		Create.RAILWAYS.onNodeRemoved(this, nodeLoc);
+		manager.onNodeRemoved(this, nodeLoc);
 		nodes.remove(nodeLoc);
 		nodesById.remove(node.getNetId());
 		connectionsByNode.remove(node);

@@ -96,8 +96,9 @@ public class TrackTargetingBlockItem extends BlockItem {
 			MutableObject<OverlapResult> result = new MutableObject<>(null);
 			withGraphLocation(level, pos, front, null, type, (overlap, location) -> result.setValue(overlap));
 
-			if (result.getValue().feedback != null) {
-				player.displayClientMessage(CreateLang.translateDirect(result.getValue().feedback)
+			if (result.getValue() == null || result.getValue().feedback != null) {
+				String feedback = result.getValue() == null ? OverlapResult.NO_TRACK.feedback : result.getValue().feedback;
+				player.displayClientMessage(CreateLang.translateDirect(feedback)
 					.withStyle(ChatFormatting.RED), true);
 				AllSoundEvents.DENY.play(level, null, pos, .5f, 1);
 				return InteractionResult.FAIL;
@@ -235,8 +236,10 @@ public class TrackTargetingBlockItem extends BlockItem {
 
 		Couple<TrackNode> nodes = location.edge.map(location.graph::locateNode);
 		TrackEdge edge = location.graph.getConnection(nodes);
-		if (edge == null)
+		if (edge == null) {
+			callback.accept(OverlapResult.NO_TRACK, null);
 			return;
+		}
 
 		EdgeData edgeData = edge.getEdgeData();
 		double edgePosition = location.position;

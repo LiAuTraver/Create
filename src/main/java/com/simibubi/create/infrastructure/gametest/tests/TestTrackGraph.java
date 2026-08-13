@@ -70,17 +70,16 @@ import org.slf4j.Logger;
  * <li>
  * the time was reduced by half when the track is non-overlapping and graph independent,
  * if the placed track was 'far away' from existings AABB, there should be no observable lag.
- * TODO: find a way to test extending existing graph.
+ * TODO: find a way to test extending existing graph. it's logically sound as well as performance boosting, but needs testing.
  * </li>
  * <p>
  * subsequent tests indicate that, thanks to the node2graph cache, the delay would be half as original.
- * as for 110k node, the node2graph field would increase memory like 6MiB(per side, hence 12MiB in singleplayer)
- * (per: 3 unique ResourceKey, 4 int, 1 HashSet, 1 weakref) , which is almost negligible.
+ * as for 110k node, the node2graph field would increase memory like 18.7MB(per side, hence 37.4MB in singleplayer)
+ * (per: 32 bytes: outer node, 128 bytes: inner set, 10 bytes: bucket overhead) , which is almost negligible.
  * <p>
- * another panelty is the track graph check which verifies the graph's ownership, also emerged via node2graph field.
- * in order to avoid corss-referencing when running singleplayer; it shouldnt matter when the server side is dedicated.
- * the panelty is O(1), called twice per placing, and 8(or 6?) per removal. so bad we had to pay the cost even when running them separate.
- * in theory, there would be slight overhead when total number of graph is low;
+ * cross-referencing issues updated sol. original see commit 681fd6e8561729a80af0e9fcf5e6ef6d8985ae58.
+ * the immediate commit solution should, in theory, slightly faster;
+ * however in these tests the result does not seem to be consistent.
  * <p>
  * TODO: test beizer curve case; theoritically it should drop from O(n^2) to O(n) + time(AABB testing).
  */

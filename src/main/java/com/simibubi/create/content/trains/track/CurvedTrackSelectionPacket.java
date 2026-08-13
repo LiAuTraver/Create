@@ -66,8 +66,9 @@ public class CurvedTrackSelectionPacket extends BlockEntityConfigurationPacket<T
 		TrackTargetingBlockItem.withGraphLocation(player.level(), pos, front,
 				bezierTrackPointLocation, type, (overlap, location) -> result.setValue(overlap));
 
-		if (result.getValue().feedback != null) {
-			player.displayClientMessage(CreateLang.translateDirect(result.getValue().feedback)
+		if (result.getValue() == null || result.getValue().feedback != null) {
+			String feedback = result.getValue() == null ? OverlapResult.NO_TRACK.feedback : result.getValue().feedback;
+			player.displayClientMessage(CreateLang.translateDirect(feedback)
 				.withStyle(ChatFormatting.RED), true);
 			AllSoundEvents.DENY.play(player.level(), null, pos, .5f, 1);
 			return;

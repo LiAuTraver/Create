@@ -886,7 +886,7 @@ public class Train {
 			return;
 		}
 
-		Set<Entry<UUID, TrackGraph>> entrySet = new HashSet<>(Create.RAILWAYS.trackNetworks.entrySet());
+		Set<Entry<UUID, TrackGraph>> entrySet = new HashSet<>(Create.RAILWAYS.sided(level).trackNetworks.entrySet());
 		Map<UUID, List<TrackGraphLocation>> successfulMigrations = new HashMap<>();
 		for (TrainMigration md : migratingPoints) {
 			for (Iterator<Entry<UUID, TrackGraph>> iterator = entrySet.iterator(); iterator.hasNext();) {

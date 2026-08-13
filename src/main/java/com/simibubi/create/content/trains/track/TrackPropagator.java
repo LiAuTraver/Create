@@ -37,23 +37,17 @@ public class TrackPropagator {
 	                             @NotNull DiscoveredLocation current) {
 	}
 
-	@NotNull
-	final GlobalRailwayManager M;
-	@NotNull
-	final LevelAccessor LA;
-	@NotNull
-	final BlockPos BP;
-	@NotNull
-	final BlockState BS;
-	@NotNull
-	final ITrackBlock TB;
-	@NotNull
-	final static Logger L = LoggerFactory.getLogger(TrackPropagator.class);
-	final static int kMaxThreshold = 0x2000;
+	private final @NotNull GlobalRailwayManager M;
+	private final @NotNull LevelAccessor LA;
+	private final @NotNull BlockPos BP;
+	private final @NotNull BlockState BS;
+	private final @NotNull ITrackBlock TB;
+	private final static @NotNull Logger L = LoggerFactory.getLogger(TrackPropagator.class);
+	private final static int kMaxThreshold = 0x2000;
 
 	/// the block state must be a track block, otherwise the behavior is undefined.
 	private TrackPropagator(@NotNull LevelAccessor LA, @NotNull BlockPos BP, @NotNull BlockState BS) {
-		this.M = Create.RAILWAYS;
+		this.M = Create.RAILWAYS.sided(LA);
 		this.LA = LA;
 		this.BP = BP;
 		this.BS = BS;
@@ -190,7 +184,7 @@ public class TrackPropagator {
 
 		connectedGraphs.stream().skip(1).forEach(other -> {
 			NeoForge.EVENT_BUS.post(new TrackGraphMergeEvent(other, canonical));
-			other.transferAll(canonical);
+			other.transferAll(LA, canonical);
 			M.removeGraphAndGroup(other);
 			M.sync.graphRemoved(other);
 		});
@@ -217,7 +211,7 @@ public class TrackPropagator {
 	private @NotNull Set<TrackNode> buildGraph(@NotNull TrackGraph graph, @NotNull DiscoveredLocation startNode) {
 		final var addedNodes = new HashSet<TrackNode>();
 		final var frontiers = new ArrayDeque<FrontierEntry>();
-		graph.createNodeIfAbsent(startNode);
+		graph.createNodeIfAbsent(LA, startNode);
 		frontiers.add(new FrontierEntry(startNode, null, startNode));
 
 		withThreshold(kMaxThreshold, frontiers, entry -> {
@@ -229,7 +223,7 @@ public class TrackPropagator {
 				connectedLocs.remove(entry.previous);
 
 			if (eligibleAsNode(entry.current, connectedLocs, first) && entry.current != startNode) {
-				final var added = graph.createNodeIfAbsent(entry.current);
+				final var added = graph.createNodeIfAbsent(LA, entry.current);
 				//noinspection DataFlowIssue
 				graph.connectNodes(LA, parent, entry.current, entry.current.getTurn());
 				addedNodes.add(graph.locateNode(entry.current));
