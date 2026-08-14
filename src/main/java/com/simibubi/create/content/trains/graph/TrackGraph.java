@@ -15,6 +15,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import net.neoforged.api.distmarker.Dist;
@@ -192,15 +193,21 @@ public class TrackGraph {
 		return true;
 	}
 
-	public boolean removeNode(@NotNull LevelAccessor level, @NotNull TrackNodeLocation location) {
-		return removeNode(level, Create.RAILWAYS.sided(level), location);
+	/**
+	 * Removes a node at the given location and optionally notifies a callback if any train
+	 * is detached as a result.
+	 *
+	 * @param onDetached optional callback invoked for each train that was detached due to this node removal
+	 */
+	public boolean removeNode(@NotNull LevelAccessor level, @NotNull TrackNodeLocation location, @Nullable Consumer<Train> onDetached) {
+		return removeNode(level, Create.RAILWAYS.sided(level), location, onDetached);
 	}
 
 	public boolean removeNode(@NotNull GlobalRailwayManager manager, @NotNull TrackNodeLocation location) {
-		return removeNode(null, manager, location);
+		return removeNode(null, manager, location, null);
 	}
 
-	private boolean removeNode(@Nullable LevelAccessor level, @NotNull GlobalRailwayManager manager, @NotNull TrackNodeLocation location) {
+	private boolean removeNode(@Nullable LevelAccessor level, @NotNull GlobalRailwayManager manager, @NotNull TrackNodeLocation location, @Nullable Consumer<Train> onDetached) {
 		TrackNode removed = nodes.remove(location);
 		if (removed == null)
 			return false;
@@ -211,8 +218,11 @@ public class TrackGraph {
 			Train train = trains.get(uuid);
 			if (train.graph != this)
 				continue;
-			if (train.isTravellingOn(removed))
+			if (train.isTravellingOn(removed)) {
 				train.detachFromTracks();
+				if (onDetached != null)
+					onDetached.accept(train);
+			}
 		}
 
 		nodesById.remove(removed.netId);
@@ -327,6 +337,12 @@ public class TrackGraph {
 		}
 	}
 
+	/**
+	 * Finds all disconnected subgraphs within this graph, assigning IDs if provided by packet data,
+	 * and transfers the disconnected nodes to newly instantiated target graphs.
+	 *
+	 * @param manager the explicit railway manager instance (server or client) to update during node transfers
+	 */
 	public Set<TrackGraph> findDisconnectedGraphs(@NotNull GlobalRailwayManager manager,
 	                                              @Nullable Map<Integer, Pair<Integer, UUID>> splitSubGraphs) {
 		Set<TrackGraph> dicovered = new HashSet<>();
@@ -388,6 +404,10 @@ public class TrackGraph {
 		transfer(level == null ? Create.RAILWAYS.sided(null) : Create.RAILWAYS.sided(level), node, target);
 	}
 
+	/**
+	 * Transfers a track node and its associated connections and edge points to a target graph,
+	 * updating the manager's node2graph cache and any trains currently travelling on this node.
+	 */
 	public void transfer(@NotNull GlobalRailwayManager manager, TrackNode node, TrackGraph target) {
 		target.addNode(manager, node);
 		target.invalidateBounds();

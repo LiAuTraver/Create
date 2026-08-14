@@ -3,7 +3,6 @@ package com.simibubi.create.content.trains.track;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -18,8 +17,11 @@ import com.simibubi.create.content.trains.graph.TrackNode;
 import com.simibubi.create.content.trains.graph.TrackNodeLocation.DiscoveredLocation;
 import com.simibubi.create.content.trains.signal.SignalPropagator;
 
+import com.simibubi.create.content.trains.entity.Train;
+
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
@@ -42,16 +44,28 @@ public class TrackPropagator {
 	private final @NotNull BlockPos BP;
 	private final @NotNull BlockState BS;
 	private final @NotNull ITrackBlock TB;
+	/**
+	 * Collects any trains that were detached during track node removal or propagation.
+	 * <p>
+	 * Reattaching these trains immediately after graph reconstruction to prevent
+	 * temporary derailment states which causes client-side visual glitches.
+	 */
+	private final @NotNull Set<Train> detachedTrains;
 	private final static @NotNull Logger L = LoggerFactory.getLogger(TrackPropagator.class);
 	private final static int kMaxThreshold = 0x2000;
 
 	/// the block state must be a track block, otherwise the behavior is undefined.
 	private TrackPropagator(@NotNull LevelAccessor LA, @NotNull BlockPos BP, @NotNull BlockState BS) {
+		this(LA, BP, BS, new HashSet<>(1));
+	}
+
+	private TrackPropagator(@NotNull LevelAccessor LA, @NotNull BlockPos BP, @NotNull BlockState BS, @NotNull Set<Train> detachedTrains) {
 		this.M = Create.RAILWAYS.sided(LA);
 		this.LA = LA;
 		this.BP = BP;
 		this.BS = BS;
 		this.TB = (ITrackBlock) BS.getBlock();
+		this.detachedTrains = detachedTrains;
 	}
 
 	public static @Nullable TrackGraph onRailAdded(@NotNull LevelAccessor reader, @NotNull BlockPos pos,
@@ -61,7 +75,7 @@ public class TrackPropagator {
 			// since it's needed to update adjacent block.
 			return null;
 
-		return new TrackPropagator(reader, pos, state).onRailAdded();
+		return new TrackPropagator(reader, pos, state).onRailAdded(true);
 	}
 
 	public static void onRailRemoved(@NotNull LevelAccessor reader, @NotNull BlockPos pos, @NotNull BlockState state) {
@@ -72,15 +86,22 @@ public class TrackPropagator {
 		new TrackPropagator(reader, pos, state).onRailRemoved();
 	}
 
-	private @NotNull TrackGraph onRailAdded() {
-		// < remove all immediately reachable node locations around the new rail
+	/**
+	 * Builds and merges the graph around a newly placed rail.
+	 *
+	 * @param reattach if true, immediately reattaches any trains collected in {@link #detachedTrains}.
+	 *                 When called as a sub-task of {@link #onRailRemoved()}, reattachment is deferred
+	 *                 (reattach = false) until {@link GlobalRailwayManager#updateSplitGraph} finished.
+	 */
+	private @NotNull TrackGraph onRailAdded(boolean reattach) {
+		//< remove all immediately reachable node locations around the new rail
 		var frontiers = getFrontiers(false);
 		final var connectedGraphs = removeReachableNodes(frontiers);
 
-		// < resolve target graph, merging if necessary
+		//< resolve target graph, merging if necessary
 		final var targetGraph = canonicalizeGraph(connectedGraphs);
 
-		// < find the first graph node candidate nearby
+		//< find the first graph node candidate nearby
 		frontiers = getFrontiers(true);
 
 		final var startNode = getStartNode(frontiers);
@@ -89,24 +110,32 @@ public class TrackPropagator {
 			return targetGraph;
 		}
 
-		// < build up the graph via all connected nodes
+		//< build up the graph via all connected nodes
 		final var addedNodes = buildGraph(targetGraph, startNode);
 		addedNodes.forEach(trackNode -> SignalPropagator.notifySignalsOfNewNode(targetGraph, trackNode));
+
+		//< reattach any trains detached during node rebuilding. this fix looks ugly but faster than global scan.
+		if (reattach && LA instanceof Level level)
+			detachedTrains.forEach(train -> train.reattachToTracks(level));
 
 		M.markTracksDirty();
 		return targetGraph;
 	}
 
+	/**
+	 * removes affected nodes, updates adjacent track graphs,
+	 * resolves graph splits, and finally reattaches all affected trains to new graphs.
+	 */
 	private void onRailRemoved() {
 		final var connectedLocs = TB.getConnected(LA, BP, BS, false, null);
 
 		final var positionsToUpdate = connectedLocs.stream()
 			.peek(removedLocation -> M.getGraphs(LA, removedLocation).forEach(foundGraph -> {
-				// > remove any nodes this rail was part of...
+				//> remove any nodes this rail was part of...
 				final var removedNode = foundGraph.locateNode(removedLocation);
 				if (removedNode == null)
 					return;
-				foundGraph.removeNode(LA, removedLocation);
+				foundGraph.removeNode(LA, removedLocation, detachedTrains::add);
 				M.sync.nodeRemoved(foundGraph, removedNode);
 				if (!foundGraph.isEmpty())
 					return;
@@ -116,13 +145,17 @@ public class TrackPropagator {
 			.flatMap(removedEnd -> removedEnd.allAdjacent().stream())
 			.collect(Collectors.toSet()); // dedup is essential in order to avoid redundant onRailAdd call
 
-		// > re-run railAdded for any track that was disconnected from this track
+		//> re-run railAdded for any track that was disconnected from this track,
+		//  reattachment is deferred until after M.updateSplitGraph
 		positionsToUpdate.stream()
-			.filter(blockPos -> !blockPos.equals(BP))
-			.map(blockPos -> onRailAdded(LA, blockPos, LA.getBlockState(blockPos)))
-			.filter(Objects::nonNull)
+			.filter(blockPos -> !blockPos.equals(BP) && LA.getBlockState(blockPos).getBlock() instanceof ITrackBlock)
+			.map(blockPos -> new TrackPropagator(LA, blockPos, LA.getBlockState(blockPos), detachedTrains).onRailAdded(false))
 			.forEach(railGraph -> M.updateSplitGraph(LA, railGraph));
-		// > check updated graph for segmentation, if any. ^^^
+		//> check updated graph for segmentation, if any. ^^^
+
+		//> ditto
+		if (LA instanceof Level level)
+			detachedTrains.forEach(train -> train.reattachToTracks(level));
 
 		M.markTracksDirty();
 	}
@@ -135,7 +168,7 @@ public class TrackPropagator {
 			final var graphs = M.getGraphs(LA, entry.current);
 			graphs.forEach(graph -> {
 				final var node = graph.locateNode(entry.current);
-				graph.removeNode(LA, entry.current);
+				graph.removeNode(LA, entry.current, detachedTrains::add);
 				// node can be null if the node2graph cache has a stale entry pointing to a
 				// graph
 				// that no longer contains this location
@@ -144,7 +177,7 @@ public class TrackPropagator {
 				//
 				// usually it won't happen. nonetheless here we suppress a NPE into
 				// TrackGraphSync, and log it for diags.
-				// if the warning triggered, code has somewhere messed up.
+				// note: if the warning triggered, code has somewhere messed up.
 				if (node == null) {
 					L.warn("node2graph cache inconsistency: graph {} returned by getGraphs " +
 					       "but locateNode({}) returned null; skipping nodeRemoved sync.", graph.id, entry.current);

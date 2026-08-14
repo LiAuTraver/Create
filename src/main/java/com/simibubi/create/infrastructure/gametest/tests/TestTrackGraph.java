@@ -363,7 +363,7 @@ public class TestTrackGraph {
 	}
 
 	// 8500ms~9000ms original
-	// 4000ms~4500ms, X-axis, patched
+	// 4500ms~5000ms, X-axis, patched
 	@SuppressWarnings("unused")
 	@GameTest(template = "empty", timeoutTicks = THIRTY_SECONDS)
 	public static void withinNonOverlapping(CreateGameTestHelper H) {
